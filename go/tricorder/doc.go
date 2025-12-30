@@ -1,7 +1,7 @@
 /*
 Package tricorder provides health metrics of an application via http.
 
-Using tricorder in code
+# Using tricorder in code
 
 Use the tricorder package in your application like so:
 
@@ -18,7 +18,7 @@ Use the tricorder package in your application like so:
 		}
 	}
 
-Viewing Metrics with a Web Browser
+# Viewing Metrics with a Web Browser
 
 Package tricorder uses the net/http package register its web UI at path "/metrics".
 Package tricorder registers static content such as CSS files at "/metricsstatic".
@@ -47,7 +47,7 @@ URL formats to view metrics:
 	http://yourhostname.com/prometheus-metrics
 		View all top level metrics in text exposition format.
 
-Fetching metrics using go RPC
+# Fetching metrics using go RPC
 
 Package tricorder registers the following go rpc methods. You can see
 these methods by visiting http://yourhostname.com/debug/rpc
@@ -58,7 +58,7 @@ Recursively lists all metrics under a particular path.
 Request is the absolute path as a string.
 Response is a messages.MetricList type.
 
-MetricsServer.GetMetric
+# MetricsServer.GetMetric
 
 Gets a single metric with a particular path or returns
 messages.ErrMetricNotFound if there is no such metric.
@@ -78,7 +78,7 @@ Example:
 		// we found /a/metric
 	}
 
-Fetching metrics using REST API
+# Fetching metrics using REST API
 
 Package tricorder registers its REST API at "/metricsapi"
 
@@ -111,7 +111,49 @@ Sample metric json object:
 
 For more information on the json schema, see the messages.Metric type.
 
-Register Custom Metrics
+		Prometheus export
+
+		In addition to the HTML, Go RPC, and JSON views described above, tricorder
+		exposes all metrics in Prometheus text exposition format at
+		"/prometheus-metrics".
+
+		The Prometheus exporter uses the same underlying metrics as the other
+		interfaces but presents them in a way that is natural for Prometheus:
+
+			* Scalar durations and other time-based values are normalized to
+			  seconds and exported with a "_seconds" suffix (or
+			  "_seconds_total" when the original name ends in "_total").
+			* Size-related metrics are normalized to bytes and exported with a
+			  "_bytes" or "_bytes_total" suffix.
+			* String metrics are exported as "*_info" gauges with the original
+			  value attached as a "value" label.
+			* Bool metrics are exported as "*_bool_info" gauges with a "value"
+			  label of "true" or "false".
+			* time.Time values are exported as "*_time_seconds" gauges
+			  representing seconds since the Unix epoch.
+			* Distributions are exported as Prometheus histograms with
+			  "_bucket", "_sum", and "_count" series.
+			* time.Time and time.Duration metrics are represented internally as
+			  native Go values (types.GoTime and types.GoDuration) for
+			  Prometheus export, rather than as JSON strings. This keeps the
+			  Prometheus output independent of any particular JSON encoding.
+			* Metrics that represent monotonic event counters (for example,
+			  /proc/events/graceful-exits or network interface statistics under
+			  /sys/netif) are exported using Prometheus counter naming
+			  conventions (for example, "*_total", "*_seconds_total", or
+			  "*_bytes_total" as appropriate), while memory usage and
+			  capacity metrics such as /proc/memory/total remain gauges.
+
+		For external tools that need to mirror this behavior, the package
+		exposes helpers:
+
+			* ClassifyPrometheusMetric, which derives the Prometheus metric
+			  name and type for a given tricorder metric.
+			* PrometheusNumericValue, which returns the numeric value in the
+			  same normalized units used by the exporter (for example,
+			  seconds for time-based metrics).
+
+	# Register Custom Metrics
 
 To add additional metrics to the default metrics tricorder provides,
 Use tricorder.RegisterMetric() and tricorder.RegisterDirectory().
