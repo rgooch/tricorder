@@ -68,6 +68,7 @@ func init() {
 	initHttpFramework()
 	initHtmlHandlers()
 	initJsonHandlers()
+	initPrometheusHandlers()
 	initRpcHandlers()
 }
 

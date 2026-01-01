@@ -44,6 +44,8 @@ URL formats to view metrics:
 			dirpath/subdir/ametric 21.3
 			dirpath/first 12345
 			dirpath/second 5.28
+	http://yourhostname.com/prometheus-metrics
+		View all top level metrics in text exposition format.
 
 Fetching metrics using go RPC
 
@@ -91,6 +93,8 @@ REST urls:
 		Returns a metric json object with absolute path
 		/path/to/metric or gives a 404 error if no such metric
 		exists.
+	http://yourhostname.com/prometheus-metrics/
+		Returns all exported metrics in text exposition format
 
 Sample metric json object:
 
