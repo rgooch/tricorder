@@ -51,13 +51,11 @@ func (c *prometheusCollector) Collect(m *metric, s *session) error {
 }
 
 func (c *prometheusCollector) emitMetric(m *messages.Metric) error {
-	// Lists do not have a natural Prometheus representation without
-	// additional schema; skip them.
-	if m.Kind == types.List {
-		return nil
-	}
-
 	switch m.Kind {
+	case types.List:
+		// Lists do not have a natural Prometheus representation without
+		// additional schema; skip them.
+		return nil
 	case types.Dist:
 		return c.emitHistogram(m)
 	case types.String:
@@ -110,14 +108,22 @@ func sanitizeHelp(help string) string {
 // promBaseName converts a Tricorder metric path (e.g. "/proc/go/num-goroutines")
 // into a Prometheus-safe base metric name (e.g. "proc_go_num_goroutines").
 func promBaseName(path string) string {
-	path = strings.TrimPrefix(path, "/")
-	name := strings.ReplaceAll(path, "/", "_")
-	name = strings.ToLower(name)
 	var b strings.Builder
-	for _, r := range name {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+	b.Grow(len(path))
+	for i, r := range path {
+		if i == 0 && r == '/' {
+			// Skip leading slash
+			continue
+		}
+		if r == '/' {
+			b.WriteRune('_')
+		} else if r >= 'A' && r <= 'Z' {
+			// Convert uppercase to lowercase
+			b.WriteRune(r + 32)
+		} else if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
 			b.WriteRune(r)
 		} else {
+			// Replace invalid characters with underscore
 			b.WriteRune('_')
 		}
 	}
@@ -158,160 +164,34 @@ func durationToSeconds(value float64, u units.Unit) float64 {
 // promNumericName returns the Prometheus metric name for a numeric metric,
 // including unit-based suffixes like _seconds, _bytes, or _celsius.
 //
-// The choice of suffix also encodes whether the metric is treated as a
-// Prometheus counter (…_total / …_seconds_total) or gauge. Most metrics follow
-// a simple convention where a "-total" suffix in the Tricorder path maps to a
-// Prometheus counter, but a few well-known metrics require semantic
-// overrides:
-//
-//   - Memory usage/capacity metrics such as /sys/memory/total and
-//     /proc/memory/total are gauges, even though their names include
-//     "total". These are exported as *_bytes, not *_bytes_total.
-//   - Network device statistics under /sys/netif (packets, bytes, errors,
-//     drops, etc.) are monotonic counters and are exported as *_total
-//     (e.g. sys_netif_eth0_rx_packets_total, sys_netif_eth0_rx_data_bytes_total),
-//     similar to Prometheus node_exporter.
+// All metrics are treated as gauges. Users should apply rate() or increase()
+// functions in their queries for counter-like semantics.
 func promNumericName(m *messages.Metric) string {
 	base := promBaseName(m.Path)
-	// Duration kind is always logically "seconds with 9 decimal places" in
-	// JSON, but the unit tells us whether it came from milliseconds or seconds.
-	hasTotalSuffix := strings.HasSuffix(base, "_total")
-	isMemGauge := isMemoryGaugeMetric(m)
-	isNetCounter := isNetworkCounterMetric(m)
-	isAdditionalCounter := isAdditionalCounterMetric(m)
-	isExplicitCounter := hasTotalSuffix || isNetCounter || isAdditionalCounter
-	if isMemGauge {
-		// Never treat memory capacity/usage metrics as counters solely due to a
-		// "-total" suffix in their names.
-		hasTotalSuffix = false
-	}
+
 	if m.Kind == types.Duration || isTimeUnit(m.Unit) {
-		// Durations and other time-like numeric scalars:
-		//   - <base>_seconds       → gauge semantics.
-		//   - <base>_seconds_total → counter semantics for explicit totals.
-		if isExplicitCounter {
-			if hasTotalSuffix {
-				base = strings.TrimSuffix(base, "_total")
-			}
-			return base + "_seconds_total"
-		}
+		// Time-based metrics get _seconds suffix
 		return base + "_seconds"
 	}
 	if isByteUnit(m.Unit) {
-		// Sizes normalized to bytes:
-		//   - <base>_bytes       → gauge semantics.
-		//   - <base>_bytes_total → counter semantics.
-		if isMemGauge {
-			if hasTotalSuffix {
-				base = strings.TrimSuffix(base, "_total")
-			}
-			return base + "_bytes"
-		}
-		if isExplicitCounter {
-			if hasTotalSuffix {
-				base = strings.TrimSuffix(base, "_total")
-			}
-			return base + "_bytes_total"
-		}
+		// Byte-based metrics get _bytes suffix
 		return base + "_bytes"
 	}
 	if m.Unit == units.Celsius {
 		return base + "_celsius"
 	}
-	// Dimensionless scalars: use _total only for explicit totals or known
-	// counter-style metrics such as /sys/netif device statistics and a small
-	// set of additional event-style metrics.
-	if isExplicitCounter {
-		if hasTotalSuffix {
-			base = strings.TrimSuffix(base, "_total")
-		}
-		return base + "_total"
-	}
+	// Dimensionless scalars use base name as-is
 	return base
-}
-
-// isMemoryGaugeMetric identifies memory metrics that represent capacities or
-// point-in-time usage and should be exported as gauges, despite having names
-// that include "total".
-//
-// Examples from the JSON fixtures:
-//   - /proc/memory/total: "System memory currently allocated to process".
-//   - /sys/memory/total:  "total memory" (system memory capacity).
-func isMemoryGaugeMetric(m *messages.Metric) bool {
-	if m == nil {
-		return false
-	}
-	if !isByteUnit(m.Unit) {
-		return false
-	}
-	switch m.Path {
-	case "/proc/memory/total", "/sys/memory/total":
-		return true
-	default:
-		return false
-	}
-}
-
-// isNetworkCounterMetric identifies network device statistics exported under
-// /sys/netif that are naturally monotonic counters (packets, bytes, errors,
-// drops, etc.). These should follow Prometheus counter naming conventions even
-// though their base Tricorder names do not end in -total.
-func isNetworkCounterMetric(m *messages.Metric) bool {
-	if m == nil {
-		return false
-	}
-	// Only numeric scalars participate in counter semantics.
-	switch m.Kind {
-	case types.Dist, types.String, types.Bool, types.Time, types.GoTime:
-		return false
-	}
-	if !strings.HasPrefix(m.Path, "/sys/netif/") {
-		return false
-	}
-	// Interface configuration values such as MTU and link speed are gauges.
-	base := promBaseName(m.Path)
-	if strings.HasSuffix(base, "_mtu") || strings.HasSuffix(base, "_speed") {
-		return false
-	}
-	return true
-}
-
-// isAdditionalCounterMetric identifies a small set of non-network metrics that
-// are semantically counters even though they may not carry an explicit
-// "-total" suffix in their Tricorder path. These metrics are exported with
-// Prometheus counter naming conventions (…_total / …_seconds_total).
-func isAdditionalCounterMetric(m *messages.Metric) bool {
-	if m == nil {
-		return false
-	}
-	// Only numeric scalars participate in counter semantics.
-	switch m.Kind {
-	case types.Dist, types.String, types.Bool, types.Time, types.GoTime:
-		return false
-	}
-	switch m.Path {
-	// Event-style process lifecycle metrics.
-	case "/proc/events/graceful-exits", "/proc/events/ungraceful-exits", "/proc/events/uncaught-panics":
-		return true
-	default:
-		return false
-	}
 }
 
 func promMetricType(name string, kind types.Type) string {
 	if kind == types.Dist {
 		return "histogram"
 	}
-	// Non-numeric kinds (string, bool, time) are always exported as
-	// info-style gauges.
-	switch kind {
-	case types.String, types.Bool, types.Time, types.GoTime:
-		return "gauge"
-	}
-	// Numeric metrics: suffix-based typing.
-	if strings.HasSuffix(name, "_total") || strings.HasSuffix(name, "_seconds_total") {
-		return "counter"
-	}
+	// All other metrics are treated as gauges for simplicity and deterministic
+	// behavior. Users can apply rate() or increase() functions in their queries
+	// for counter-like semantics. Future enhancement: allow explicit counter
+	// registration in Tricorder API.
 	return "gauge"
 }
 
@@ -324,13 +204,12 @@ func ClassifyPrometheusMetric(m *messages.Metric) (name, mtype string, exported 
 	if m == nil {
 		return "", "", false
 	}
-	// Lists do not have a natural Prometheus representation without additional
-	// schema; skip them, as emitMetric does.
-	if m.Kind == types.List {
-		return "", "", false
-	}
 	// Match prometheusCollector.emitMetric and related helpers.
 	switch m.Kind {
+	case types.List:
+		// Lists do not have a natural Prometheus representation without additional
+		// schema; skip them, as emitMetric does.
+		return "", "", false
 	case types.Dist:
 		base := promBaseName(m.Path)
 		if isTimeUnit(m.Unit) {
@@ -430,6 +309,7 @@ func (c *prometheusCollector) emitNumeric(m *messages.Metric) error {
 	if err := c.emitFamilyHeader(name, m.Description, mtype); err != nil {
 		return err
 	}
+	// Format float using 'g' format (compact representation) with full precision (-1).
 	if _, err := fmt.Fprintf(c.w, "%s %s\n", name, strconv.FormatFloat(value, 'g', -1, 64)); err != nil {
 		return err
 	}
@@ -458,23 +338,29 @@ func (c *prometheusCollector) emitBoolInfo(m *messages.Metric) error {
 	if !ok {
 		return nil
 	}
-	name := promBaseName(m.Path) + "_bool_info"
+	name := promBaseName(m.Path)
 	mtype := "gauge"
 	if err := c.emitFamilyHeader(name, m.Description, mtype); err != nil {
 		return err
 	}
-	valStr := "false"
+	var numericValue int
 	if value {
-		valStr = "true"
+		numericValue = 1
 	}
-	if _, err := fmt.Fprintf(c.w, "%s{value=\"%s\"} 1\n", name, valStr); err != nil {
+	if _, err := fmt.Fprintf(c.w, "%s %d\n", name, numericValue); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (c *prometheusCollector) emitTimeGauge(m *messages.Metric) error {
-	name := promBaseName(m.Path) + "_time_seconds"
+	base := promBaseName(m.Path)
+	var name string
+	if strings.HasSuffix(base, "_time") {
+		name = base + "_seconds"
+	} else {
+		name = base + "_time_seconds"
+	}
 	var seconds float64
 	switch v := m.Value.(type) {
 	case string:
@@ -486,7 +372,7 @@ func (c *prometheusCollector) emitTimeGauge(m *messages.Metric) error {
 		seconds = f
 	case time.Time:
 		// Native Go representation: convert to seconds since the epoch.
-		seconds = float64(v.Unix()) + float64(v.Nanosecond())/1e9
+		seconds = float64(v.UnixNano()) / 1e9
 	default:
 		// Unknown encoding; ignore.
 		return nil
@@ -495,6 +381,7 @@ func (c *prometheusCollector) emitTimeGauge(m *messages.Metric) error {
 	if err := c.emitFamilyHeader(name, m.Description, mtype); err != nil {
 		return err
 	}
+	// Format float using 'g' format (compact representation) with full precision (-1).
 	if _, err := fmt.Fprintf(c.w, "%s %s\n", name, strconv.FormatFloat(seconds, 'g', -1, 64)); err != nil {
 		return err
 	}
@@ -502,10 +389,37 @@ func (c *prometheusCollector) emitTimeGauge(m *messages.Metric) error {
 }
 
 func escapeLabelValue(v string) string {
-	v = strings.ReplaceAll(v, "\\", "\\\\")
-	v = strings.ReplaceAll(v, "\n", "\\n")
-	v = strings.ReplaceAll(v, "\"", "\\\"")
-	return v
+	var b strings.Builder
+	var needsEscape bool
+
+	// Check if escaping is needed
+	for _, r := range v {
+		if r == '\\' || r == '\n' || r == '"' {
+			needsEscape = true
+			break
+		}
+	}
+
+	// If no escaping needed, return original string
+	if !needsEscape {
+		return v
+	}
+
+	// Lazy allocation: only allocate builder if needed
+	b.Grow(len(v))
+	for _, r := range v {
+		switch r {
+		case '\\':
+			b.WriteString("\\\\")
+		case '\n':
+			b.WriteString("\\n")
+		case '"':
+			b.WriteString("\\\"")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func (c *prometheusCollector) emitHistogram(m *messages.Metric) error {
@@ -540,11 +454,13 @@ func (c *prometheusCollector) emitHistogram(m *messages.Metric) error {
 	})
 
 	var cumulative uint64
+	var hasInfBucket bool
 	for _, r := range ranges {
 		cumulative += r.Count
 		var le string
 		if r.Upper == 0 {
 			le = "+Inf"
+			hasInfBucket = true
 		} else {
 			upper := r.Upper
 			if isTimeUnit(m.Unit) {
@@ -552,12 +468,14 @@ func (c *prometheusCollector) emitHistogram(m *messages.Metric) error {
 			}
 			le = strconv.FormatFloat(upper, 'g', -1, 64)
 		}
-		if _, err := fmt.Fprintf(
-			c.w,
-			"%s_bucket{le=\"%s\"} %d\n",
-			base,
-			le,
-			cumulative); err != nil {
+		if _, err := fmt.Fprint(c.w, base, "_bucket{le=\"", le, "\"} ", cumulative, "\n"); err != nil {
+			return err
+		}
+	}
+
+	// Ensure +Inf bucket is always present for Prometheus compatibility.
+	if !hasInfBucket {
+		if _, err := fmt.Fprint(c.w, base, "_bucket{le=\"+Inf\"} ", dist.Count, "\n"); err != nil {
 			return err
 		}
 	}
