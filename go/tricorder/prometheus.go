@@ -162,17 +162,13 @@ func durationToSeconds(value float64, u units.Unit) float64 {
 }
 
 // promNumericName returns the Prometheus metric name for a numeric metric,
-// including unit-based suffixes like _seconds, _bytes, or _celsius.
+// including unit-based suffixes like _bytes or _celsius.
 //
 // All metrics are treated as gauges. Users should apply rate() or increase()
 // functions in their queries for counter-like semantics.
 func promNumericName(m *messages.Metric) string {
 	base := promBaseName(m.Path)
 
-	if m.Kind == types.Duration || isTimeUnit(m.Unit) {
-		// Time-based metrics get _seconds suffix
-		return base + "_seconds"
-	}
 	if isByteUnit(m.Unit) {
 		// Byte-based metrics get _bytes suffix
 		return base + "_bytes"
@@ -180,7 +176,7 @@ func promNumericName(m *messages.Metric) string {
 	if m.Unit == units.Celsius {
 		return base + "_celsius"
 	}
-	// Dimensionless scalars use base name as-is
+	// Time-based and dimensionless scalars use base name as-is
 	return base
 }
 
@@ -212,9 +208,7 @@ func ClassifyPrometheusMetric(m *messages.Metric) (name, mtype string, exported 
 		return "", "", false
 	case types.Dist:
 		base := promBaseName(m.Path)
-		if isTimeUnit(m.Unit) {
-			base += "_seconds"
-		} else if isByteUnit(m.Unit) {
+		if isByteUnit(m.Unit) {
 			base += "_bytes"
 		}
 		return base, "histogram", true
@@ -223,34 +217,12 @@ func ClassifyPrometheusMetric(m *messages.Metric) (name, mtype string, exported 
 	case types.Bool:
 		return promBaseName(m.Path) + "_bool_info", "gauge", true
 	case types.Time, types.GoTime:
-		return promBaseName(m.Path) + "_time_seconds", "gauge", true
+		return promBaseName(m.Path), "gauge", true
 	default:
 		name = promNumericName(m)
 		mtype = promMetricType(name, m.Kind)
 		return name, mtype, true
 	}
-}
-
-// PrometheusNumericValue returns the numeric value for a metric in the same
-// normalized units that Prometheus export uses. For time-based values this
-// means seconds; for other numeric scalars it is the raw value converted to a
-// float64.
-//
-// It returns ok=false if the metric cannot be represented as a single
-// float64 (for example, distributions or non-numeric kinds).
-func PrometheusNumericValue(m *messages.Metric) (value float64, ok bool) {
-	if m == nil {
-		return 0, false
-	}
-	value, ok = numericValue(m)
-	if !ok {
-		return 0, false
-	}
-	// Normalize durations/time-based values to seconds where applicable.
-	if m.Kind == types.Duration || isTimeUnit(m.Unit) {
-		value = durationToSeconds(value, m.Unit)
-	}
-	return value, true
 }
 
 func numericValue(m *messages.Metric) (float64, bool) {
@@ -354,13 +326,7 @@ func (c *prometheusCollector) emitBoolInfo(m *messages.Metric) error {
 }
 
 func (c *prometheusCollector) emitTimeGauge(m *messages.Metric) error {
-	base := promBaseName(m.Path)
-	var name string
-	if strings.HasSuffix(base, "_time") {
-		name = base + "_seconds"
-	} else {
-		name = base + "_time_seconds"
-	}
+	name := promBaseName(m.Path)
 	var seconds float64
 	switch v := m.Value.(type) {
 	case string:
@@ -428,11 +394,8 @@ func (c *prometheusCollector) emitHistogram(m *messages.Metric) error {
 		return nil
 	}
 	base := promBaseName(m.Path)
-	// Time-based distributions are normalized to seconds and get a _seconds
-	// suffix; byte-based distributions would get _bytes.
-	if isTimeUnit(m.Unit) {
-		base = base + "_seconds"
-	} else if isByteUnit(m.Unit) {
+	// Byte-based distributions get _bytes suffix.
+	if isByteUnit(m.Unit) {
 		base = base + "_bytes"
 	}
 	mtype := "histogram"

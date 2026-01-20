@@ -144,15 +144,6 @@ For more information on the json schema, see the messages.Metric type.
 			  "*_bytes_total" as appropriate), while memory usage and
 			  capacity metrics such as /proc/memory/total remain gauges.
 
-		For external tools that need to mirror this behavior, the package
-		exposes helpers:
-
-			* ClassifyPrometheusMetric, which derives the Prometheus metric
-			  name and type for a given tricorder metric.
-			* PrometheusNumericValue, which returns the numeric value in the
-			  same normalized units used by the exporter (for example,
-			  seconds for time-based metrics).
-
 	# Register Custom Metrics
 
 To add additional metrics to the default metrics tricorder provides,
