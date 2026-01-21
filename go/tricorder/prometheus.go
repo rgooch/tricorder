@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	prometheusContentType = "text/plain; version=0.0.4"
+	prometheusContentType = "text/plain; version=0.0.4; charset=utf-8"
 )
 
 // promFamily tracks metadata for a single Prometheus metric family so that
@@ -215,7 +215,7 @@ func ClassifyPrometheusMetric(m *messages.Metric) (name, mtype string, exported 
 	case types.String:
 		return promBaseName(m.Path) + "_info", "gauge", true
 	case types.Bool:
-		return promBaseName(m.Path) + "_bool_info", "gauge", true
+		return promBaseName(m.Path), "gauge", true
 	case types.Time, types.GoTime:
 		return promBaseName(m.Path), "gauge", true
 	default:
@@ -403,44 +403,48 @@ func (c *prometheusCollector) emitHistogram(m *messages.Metric) error {
 		return err
 	}
 
-	// Prepare buckets: convert ranges to cumulative counts with normalized
-	// upper bounds. Ranges may not be sorted, so sort defensively.
-	ranges := make([]*messages.RangeWithCount, 0, len(dist.Ranges))
+	// Prepare buckets: separate finite buckets from +Inf bucket (Upper == 0).
+	// Sort finite buckets by upper bound, then emit +Inf last.
+	var finiteBuckets []*messages.RangeWithCount
+	var infBucketCount uint64
+	var hasInfBucket bool
 	for _, r := range dist.Ranges {
 		if r == nil {
 			continue
 		}
-		ranges = append(ranges, r)
-	}
-	sort.Slice(ranges, func(i, j int) bool {
-		return ranges[i].Upper < ranges[j].Upper
-	})
-
-	var cumulative uint64
-	var hasInfBucket bool
-	for _, r := range ranges {
-		cumulative += r.Count
-		var le string
 		if r.Upper == 0 {
-			le = "+Inf"
+			// Upper == 0 represents +Inf in tricorder
+			infBucketCount = r.Count
 			hasInfBucket = true
 		} else {
-			upper := r.Upper
-			if isTimeUnit(m.Unit) {
-				upper = durationToSeconds(upper, m.Unit)
-			}
-			le = strconv.FormatFloat(upper, 'g', -1, 64)
+			finiteBuckets = append(finiteBuckets, r)
 		}
+	}
+	sort.Slice(finiteBuckets, func(i, j int) bool {
+		return finiteBuckets[i].Upper < finiteBuckets[j].Upper
+	})
+
+	// Emit finite buckets with cumulative counts
+	var cumulative uint64
+	for _, r := range finiteBuckets {
+		cumulative += r.Count
+		upper := r.Upper
+		if isTimeUnit(m.Unit) {
+			upper = durationToSeconds(upper, m.Unit)
+		}
+		le := strconv.FormatFloat(upper, 'g', -1, 64)
 		if _, err := fmt.Fprint(c.w, base, "_bucket{le=\"", le, "\"} ", cumulative, "\n"); err != nil {
 			return err
 		}
 	}
 
-	// Ensure +Inf bucket is always present for Prometheus compatibility.
-	if !hasInfBucket {
-		if _, err := fmt.Fprint(c.w, base, "_bucket{le=\"+Inf\"} ", dist.Count, "\n"); err != nil {
-			return err
-		}
+	// Always emit +Inf bucket last. Use dist.Count as total for +Inf.
+	// If there was an explicit +Inf bucket, add its count to cumulative.
+	if hasInfBucket {
+		cumulative += infBucketCount
+	}
+	if _, err := fmt.Fprint(c.w, base, "_bucket{le=\"+Inf\"} ", dist.Count, "\n"); err != nil {
+		return err
 	}
 
 	// Sum and count, normalizing sum for time-based units.
