@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,9 +54,7 @@ func (c *prometheusCollector) Collect(m *metric, s *session) error {
 func (c *prometheusCollector) emitMetric(m *messages.Metric) error {
 	switch m.Kind {
 	case types.List:
-		// Lists do not have a natural Prometheus representation without
-		// additional schema; skip them.
-		return nil
+		return c.emitList(m)
 	case types.Dist:
 		return c.emitHistogram(m)
 	case types.String:
@@ -99,15 +98,22 @@ func (c *prometheusCollector) emitFamilyHeader(name, help, mtype string) error {
 }
 
 func sanitizeHelp(help string) string {
-	// Prometheus HELP text should escape backslashes and newlines.
+	// Prometheus HELP text should escape backslashes, newlines, and carriage returns.
 	help = strings.ReplaceAll(help, "\\", "\\\\")
 	help = strings.ReplaceAll(help, "\n", "\\n")
+	help = strings.ReplaceAll(help, "\r", "\\r")
 	return help
 }
 
 // promBaseName converts a Tricorder metric path (e.g. "/proc/go/num-goroutines")
 // into a Prometheus-safe base metric name (e.g. "proc_go_num_goroutines").
+// Prometheus metric names must match [a-zA-Z_:][a-zA-Z0-9_:]*.
 func promBaseName(path string) string {
+	// Handle empty or root-only paths
+	if path == "" || path == "/" {
+		return "unknown_metric"
+	}
+
 	var b strings.Builder
 	b.Grow(len(path))
 	for i, r := range path {
@@ -127,7 +133,13 @@ func promBaseName(path string) string {
 			b.WriteRune('_')
 		}
 	}
-	return b.String()
+
+	result := b.String()
+	// Prometheus metric names cannot start with a digit; prefix with underscore if needed
+	if len(result) > 0 && result[0] >= '0' && result[0] <= '9' {
+		return "_" + result
+	}
+	return result
 }
 
 func isTimeUnit(u units.Unit) bool {
@@ -161,14 +173,30 @@ func durationToSeconds(value float64, u units.Unit) float64 {
 	return value / factor
 }
 
+// formatBucketBound formats a float64 for use as a Prometheus histogram bucket
+// boundary (le label). Whole numbers get a ".0" suffix to match legacy Python
+// bridge output (e.g., "1.0" instead of "1").
+func formatBucketBound(v float64) string {
+	s := strconv.FormatFloat(v, 'g', -1, 64)
+	// If it's a whole number (no decimal point or exponent), add ".0"
+	if !strings.ContainsAny(s, ".eE") {
+		s += ".0"
+	}
+	return s
+}
+
 // promNumericName returns the Prometheus metric name for a numeric metric,
-// including unit-based suffixes like _bytes or _celsius.
+// including unit-based suffixes like _seconds, _bytes, or _celsius.
 //
 // All metrics are treated as gauges. Users should apply rate() or increase()
 // functions in their queries for counter-like semantics.
 func promNumericName(m *messages.Metric) string {
 	base := promBaseName(m.Path)
 
+	if m.Kind == types.Duration || isTimeUnit(m.Unit) {
+		// Time-based metrics get _seconds suffix to match bridge behavior
+		return base + "_seconds"
+	}
 	if isByteUnit(m.Unit) {
 		// Byte-based metrics get _bytes suffix
 		return base + "_bytes"
@@ -176,7 +204,7 @@ func promNumericName(m *messages.Metric) string {
 	if m.Unit == units.Celsius {
 		return base + "_celsius"
 	}
-	// Time-based and dimensionless scalars use base name as-is
+	// Dimensionless scalars use base name as-is
 	return base
 }
 
@@ -203,10 +231,17 @@ func ClassifyPrometheusMetric(m *messages.Metric) (name, mtype string, exported 
 	// Match prometheusCollector.emitMetric and related helpers.
 	switch m.Kind {
 	case types.List:
-		// Lists do not have a natural Prometheus representation without additional
-		// schema; skip them, as emitMetric does.
-		return "", "", false
+		// Lists are exported as gauges with _count suffix for the count,
+		// plus individual samples with check labels
+		base := promBaseName(m.Path)
+		// Remove -list suffix if present and add _count
+		if strings.HasSuffix(base, "_list") {
+			base = strings.TrimSuffix(base, "_list")
+		}
+		return base + "_count", "gauge", true
 	case types.Dist:
+		// Histograms use base name only - no _seconds suffix for time distributions
+		// (matches bridge behavior: allocator_recalculate_time, not _seconds)
 		base := promBaseName(m.Path)
 		if isByteUnit(m.Unit) {
 			base += "_bytes"
@@ -215,9 +250,15 @@ func ClassifyPrometheusMetric(m *messages.Metric) (name, mtype string, exported 
 	case types.String:
 		return promBaseName(m.Path) + "_info", "gauge", true
 	case types.Bool:
+		// Boolean metrics use base name only, no _bool_info suffix
+		// (matches bridge behavior: health_checks_crond_healthy, not _bool_info)
 		return promBaseName(m.Path), "gauge", true
 	case types.Time, types.GoTime:
-		return promBaseName(m.Path), "gauge", true
+		base := promBaseName(m.Path)
+		if strings.HasSuffix(base, "_time") {
+			return base + "_seconds", "gauge", true
+		}
+		return base + "_time_seconds", "gauge", true
 	default:
 		name = promNumericName(m)
 		mtype = promMetricType(name, m.Kind)
@@ -227,6 +268,8 @@ func ClassifyPrometheusMetric(m *messages.Metric) (name, mtype string, exported 
 
 func numericValue(m *messages.Metric) (float64, bool) {
 	switch v := m.Value.(type) {
+	case int:
+		return float64(v), true
 	case int8:
 		return float64(v), true
 	case int16:
@@ -235,6 +278,8 @@ func numericValue(m *messages.Metric) (float64, bool) {
 		return float64(v), true
 	case int64:
 		return float64(v), true
+	case uint:
+		return float64(v), true
 	case uint8:
 		return float64(v), true
 	case uint16:
@@ -242,6 +287,8 @@ func numericValue(m *messages.Metric) (float64, bool) {
 	case uint32:
 		return float64(v), true
 	case uint64:
+		// Note: Values > 2^53 may lose precision when converted to float64.
+		// This is a known limitation that matches the Python bridge behavior.
 		return float64(v), true
 	case float32:
 		return float64(v), true
@@ -310,6 +357,7 @@ func (c *prometheusCollector) emitBoolInfo(m *messages.Metric) error {
 	if !ok {
 		return nil
 	}
+	// Use base name only - no _bool_info suffix (matches bridge behavior)
 	name := promBaseName(m.Path)
 	mtype := "gauge"
 	if err := c.emitFamilyHeader(name, m.Description, mtype); err != nil {
@@ -325,8 +373,116 @@ func (c *prometheusCollector) emitBoolInfo(m *messages.Metric) error {
 	return nil
 }
 
+func (c *prometheusCollector) emitList(m *messages.Metric) error {
+	// Get the list as a slice using reflection
+	sliceValue := reflect.ValueOf(m.Value)
+	if sliceValue.Kind() != reflect.Slice {
+		return nil
+	}
+
+	listLen := sliceValue.Len()
+
+	// Generate base name - remove _list suffix if present
+	base := promBaseName(m.Path)
+	if strings.HasSuffix(base, "_list") {
+		base = strings.TrimSuffix(base, "_list")
+	}
+
+	// Always emit the family header for consistency (even for empty lists)
+	infoName := base
+	mtype := "gauge"
+	if err := c.emitFamilyHeader(infoName, m.Description, mtype); err != nil {
+		return err
+	}
+
+	// Emit info metric for each item in the list (with check label)
+	for i := 0; i < listLen; i++ {
+		item := sliceValue.Index(i)
+		itemStr := formatListItem(item, m.SubType)
+		labelValue := escapeLabelValue(itemStr)
+		if _, err := fmt.Fprintf(c.w, "%s{check=\"%s\"} 1\n", infoName, labelValue); err != nil {
+			return err
+		}
+	}
+
+	// Emit count metric
+	countName := base + "_count"
+	countDesc := fmt.Sprintf("Number of items in list (%s)", m.Description)
+	if err := c.emitFamilyHeader(countName, countDesc, "gauge"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(c.w, "%s %d\n", countName, listLen); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// formatListItem converts a list element to its string representation.
+// It safely handles type mismatches by falling back to fmt.Sprintf.
+func formatListItem(v reflect.Value, subType types.Type) string {
+	// Safety check: ensure the value is valid before processing
+	if !v.IsValid() {
+		return ""
+	}
+
+	// Use type switch with kind validation to prevent panics
+	switch subType {
+	case types.String:
+		if v.Kind() == reflect.String {
+			return v.String()
+		}
+	case types.Bool:
+		if v.Kind() == reflect.Bool {
+			if v.Bool() {
+				return "true"
+			}
+			return "false"
+		}
+	case types.Int8, types.Int16, types.Int32, types.Int64:
+		switch v.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return strconv.FormatInt(v.Int(), 10)
+		}
+	case types.Uint8, types.Uint16, types.Uint32, types.Uint64:
+		switch v.Kind() {
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			return strconv.FormatUint(v.Uint(), 10)
+		}
+	case types.Float32, types.Float64:
+		switch v.Kind() {
+		case reflect.Float32, reflect.Float64:
+			return strconv.FormatFloat(v.Float(), 'g', -1, 64)
+		}
+	case types.Time, types.GoTime:
+		if v.CanInterface() {
+			if t, ok := v.Interface().(time.Time); ok {
+				return t.Format(time.RFC3339)
+			}
+		}
+	case types.Duration, types.GoDuration:
+		if v.CanInterface() {
+			if d, ok := v.Interface().(time.Duration); ok {
+				return d.String()
+			}
+		}
+	}
+
+	// Fallback: safely convert to string using fmt.Sprintf
+	if v.CanInterface() {
+		return fmt.Sprintf("%v", v.Interface())
+	}
+	return ""
+}
+
 func (c *prometheusCollector) emitTimeGauge(m *messages.Metric) error {
-	name := promBaseName(m.Path)
+	base := promBaseName(m.Path)
+	var name string
+	if strings.HasSuffix(base, "_time") {
+		name = base + "_seconds"
+	} else {
+		name = base + "_time_seconds"
+	}
 	var seconds float64
 	switch v := m.Value.(type) {
 	case string:
@@ -394,7 +550,8 @@ func (c *prometheusCollector) emitHistogram(m *messages.Metric) error {
 		return nil
 	}
 	base := promBaseName(m.Path)
-	// Byte-based distributions get _bytes suffix.
+	// Only byte-based distributions get _bytes suffix
+	// Time-based histograms use base name only (matches bridge behavior)
 	if isByteUnit(m.Unit) {
 		base = base + "_bytes"
 	}
@@ -432,7 +589,7 @@ func (c *prometheusCollector) emitHistogram(m *messages.Metric) error {
 		if isTimeUnit(m.Unit) {
 			upper = durationToSeconds(upper, m.Unit)
 		}
-		le := strconv.FormatFloat(upper, 'g', -1, 64)
+		le := formatBucketBound(upper)
 		if _, err := fmt.Fprint(c.w, base, "_bucket{le=\"", le, "\"} ", cumulative, "\n"); err != nil {
 			return err
 		}
