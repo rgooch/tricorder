@@ -349,6 +349,10 @@ func (c *prometheusCollector) emitStringInfo(m *messages.Metric) error {
 	if !ok {
 		return nil
 	}
+	// Normalize nil string representation to "none"
+	if value == "<nil>" {
+		value = "none"
+	}
 	name := promBaseName(m.Path) + "_info"
 	mtype := "gauge"
 	if err := c.emitFamilyHeader(name, m.Description, mtype); err != nil {
@@ -432,14 +436,19 @@ func (c *prometheusCollector) emitList(m *messages.Metric) error {
 func formatListItem(v reflect.Value, subType types.Type) string {
 	// Safety check: ensure the value is valid before processing
 	if !v.IsValid() {
-		return ""
+		return "none"
 	}
 
 	// Use type switch with kind validation to prevent panics
 	switch subType {
 	case types.String:
 		if v.Kind() == reflect.String {
-			return v.String()
+			s := v.String()
+			// reflect.Value.String() returns "<nil>" for nil interfaces
+			if s == "<nil>" {
+				return "none"
+			}
+			return s
 		}
 	case types.Bool:
 		if v.Kind() == reflect.Bool {
@@ -479,9 +488,21 @@ func formatListItem(v reflect.Value, subType types.Type) string {
 
 	// Fallback: safely convert to string using fmt.Sprintf
 	if v.CanInterface() {
-		return fmt.Sprintf("%v", v.Interface())
+		iface := v.Interface()
+		// Check if the interface value is nil
+		if iface == nil {
+			return "none"
+		}
+		// Also handle nil pointers/interfaces wrapped in interface{}
+		rv := reflect.ValueOf(iface)
+		if rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {
+			if rv.IsNil() {
+				return "none"
+			}
+		}
+		return fmt.Sprintf("%v", iface)
 	}
-	return ""
+	return "none"
 }
 
 func (c *prometheusCollector) emitTimeGauge(m *messages.Metric) error {
