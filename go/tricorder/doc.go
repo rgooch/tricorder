@@ -1,7 +1,7 @@
 /*
 Package tricorder provides health metrics of an application via http.
 
-Using tricorder in code
+# Using tricorder in code
 
 Use the tricorder package in your application like so:
 
@@ -18,7 +18,7 @@ Use the tricorder package in your application like so:
 		}
 	}
 
-Viewing Metrics with a Web Browser
+# Viewing Metrics with a Web Browser
 
 Package tricorder uses the net/http package register its web UI at path "/metrics".
 Package tricorder registers static content such as CSS files at "/metricsstatic".
@@ -44,8 +44,10 @@ URL formats to view metrics:
 			dirpath/subdir/ametric 21.3
 			dirpath/first 12345
 			dirpath/second 5.28
+	http://yourhostname.com/prometheus-metrics
+		View all top level metrics in text exposition format.
 
-Fetching metrics using go RPC
+# Fetching metrics using go RPC
 
 Package tricorder registers the following go rpc methods. You can see
 these methods by visiting http://yourhostname.com/debug/rpc
@@ -56,7 +58,7 @@ Recursively lists all metrics under a particular path.
 Request is the absolute path as a string.
 Response is a messages.MetricList type.
 
-MetricsServer.GetMetric
+# MetricsServer.GetMetric
 
 Gets a single metric with a particular path or returns
 messages.ErrMetricNotFound if there is no such metric.
@@ -76,7 +78,7 @@ Example:
 		// we found /a/metric
 	}
 
-Fetching metrics using REST API
+# Fetching metrics using REST API
 
 Package tricorder registers its REST API at "/metricsapi"
 
@@ -91,6 +93,8 @@ REST urls:
 		Returns a metric json object with absolute path
 		/path/to/metric or gives a 404 error if no such metric
 		exists.
+	http://yourhostname.com/prometheus-metrics/
+		Returns all exported metrics in text exposition format
 
 Sample metric json object:
 
@@ -107,7 +111,69 @@ Sample metric json object:
 
 For more information on the json schema, see the messages.Metric type.
 
-Register Custom Metrics
+# Prometheus Export
+
+In addition to the HTML, Go RPC, and JSON views described above, tricorder
+exposes all metrics in Prometheus text exposition format at
+"/prometheus-metrics".
+
+The Prometheus exporter uses the same underlying metrics as the other
+interfaces but presents them in a way that is natural for Prometheus:
+
+  - Scalar durations and other time-based values are normalized to
+    seconds and exported with a "_seconds" suffix.
+  - Size-related metrics are normalized to bytes and exported with a
+    "_bytes" suffix.
+  - Temperature metrics are exported with a "_celsius" suffix.
+  - String metrics are exported as "*_info" gauges with the original
+    value attached as a "value" label.
+  - Bool metrics are exported as gauges with a numeric value of 1 for
+    true and 0 for false.
+  - List metrics are exported as gauges with a {check="..."} label for
+    each item, plus a "*_count" gauge for the total number of items.
+  - time.Time values are exported as "*_time_seconds" gauges
+    representing seconds since the Unix epoch.
+  - Distributions are exported as Prometheus histograms with
+    "_bucket", "_sum", and "_count" series. The +Inf bucket is always
+    emitted last, and bucket counts are cumulative.
+  - time.Time and time.Duration metrics are represented internally as
+    native Go values (types.GoTime and types.GoDuration) for
+    Prometheus export, rather than as JSON strings. This keeps the
+    Prometheus output independent of any particular JSON encoding.
+  - All metrics are exported as gauges. Users should apply rate() or
+    increase() functions in their Prometheus queries for counter-like
+    semantics.
+
+Metric names are converted from Tricorder paths to Prometheus-compatible
+names: path separators (/) become underscores, uppercase letters are
+converted to lowercase, and characters that are not letters, digits, or
+underscores (such as -, *, or .) are replaced with underscores. Consecutive
+underscores are collapsed to a single underscore, and trailing underscores
+are removed. Names starting with a digit are prefixed with an underscore.
+
+Examples of metric name conversion:
+
+	/proc/go/NumGoroutines       ->  proc_go_numgoroutines     (uppercase)
+	/health-checks/crond         ->  health_checks_crond       (hyphen)
+	/health-checks/crond*        ->  health_checks_crond       (trailing *)
+	/health-checks/[*]/healthy   ->  health_checks_healthy     (wildcard path)
+	/sys/netif/eth0/rx-bytes     ->  sys_netif_eth0_rx_bytes   (typical path)
+
+Note: [*] represents a literal asterisk. Due to Go comment syntax, the
+actual character sequence slash-asterisk-slash cannot appear in this
+documentation. In the example above, /health-checks/[*]/healthy shows
+how a wildcard path component is absorbed after underscore collapsing.
+
+Label values (such as the "value" label for string metrics or the "check"
+label for list metrics) preserve most characters but escape backslashes
+as \\, double quotes as \", and newlines as \n. HELP text is similarly
+escaped to comply with the Prometheus exposition format.
+
+The endpoint returns Content-Type "text/plain; version=0.0.4; charset=utf-8"
+for compatibility with OpenTelemetry Collector and other Prometheus
+scrapers. Gzip compression is supported via the Accept-Encoding header.
+
+# Register Custom Metrics
 
 To add additional metrics to the default metrics tricorder provides,
 Use tricorder.RegisterMetric() and tricorder.RegisterDirectory().

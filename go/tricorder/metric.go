@@ -1178,6 +1178,16 @@ func (v *value) UpdateRpcMetric(s *session, metric *messages.Metric) {
 	v.updateJsonOrRpcMetric(s, metric, goRpcEncoding)
 }
 
+// UpdatePromMetric updates fields in this metric for Prometheus export.
+//
+// Prometheus uses the native Go representations for time and duration
+// (types.GoTime, types.GoDuration) rather than the JSON-specific
+// string encodings. This mirrors the GoRPC representation but is
+// independent of any wire format.
+func (v *value) UpdatePromMetric(s *session, metric *messages.Metric) {
+	v.updateJsonOrRpcMetric(s, metric, goRpcEncoding)
+}
+
 func addSeparators(orig string, separator rune, digitsBetween int) string {
 	s := ([]byte)(orig)
 	start := bytes.IndexFunc(s, func(r rune) bool {
@@ -1410,6 +1420,25 @@ func (m *metric) InitRpcMetric(s *session, metric *messages.Metric) {
 // only a partial initialization.
 func (m *metric) UpdateRpcMetric(s *session, metric *messages.Metric) {
 	m.InitRpcMetric(s, metric)
+}
+
+// InitPromMetric initializes 'metric' for Prometheus export with this
+// instance. It uses the native Go value kinds (e.g. types.GoTime,
+// types.GoDuration) so that callers do not depend on JSON-specific
+// string encodings.
+func (m *metric) InitPromMetric(s *session, metric *messages.Metric) {
+	*metric = messages.Metric{
+		Path:        m.AbsPath(),
+		Description: m.Description,
+	}
+	m.value.UpdatePromMetric(s, metric)
+}
+
+// UpdatePromMetric is a synonym for InitPromMetric. Here to prevent
+// client code from accidentally calling value.UpdatePromMetric, which
+// only performs the value-specific portion of initialization.
+func (m *metric) UpdatePromMetric(s *session, metric *messages.Metric) {
+	m.InitPromMetric(s, metric)
 }
 
 // listEntry represents a single entry in a directory listing.
