@@ -111,40 +111,69 @@ Sample metric json object:
 
 For more information on the json schema, see the messages.Metric type.
 
-		Prometheus export
+# Prometheus Export
 
-		In addition to the HTML, Go RPC, and JSON views described above, tricorder
-		exposes all metrics in Prometheus text exposition format at
-		"/prometheus-metrics".
+In addition to the HTML, Go RPC, and JSON views described above, tricorder
+exposes all metrics in Prometheus text exposition format at
+"/prometheus-metrics".
 
-		The Prometheus exporter uses the same underlying metrics as the other
-		interfaces but presents them in a way that is natural for Prometheus:
+The Prometheus exporter uses the same underlying metrics as the other
+interfaces but presents them in a way that is natural for Prometheus:
 
-			* Scalar durations and other time-based values are normalized to
-			  seconds and exported with a "_seconds" suffix (or
-			  "_seconds_total" when the original name ends in "_total").
-			* Size-related metrics are normalized to bytes and exported with a
-			  "_bytes" or "_bytes_total" suffix.
-			* String metrics are exported as "*_info" gauges with the original
-			  value attached as a "value" label.
-			* Bool metrics are exported as "*_bool_info" gauges with a "value"
-			  label of "true" or "false".
-			* time.Time values are exported as "*_time_seconds" gauges
-			  representing seconds since the Unix epoch.
-			* Distributions are exported as Prometheus histograms with
-			  "_bucket", "_sum", and "_count" series.
-			* time.Time and time.Duration metrics are represented internally as
-			  native Go values (types.GoTime and types.GoDuration) for
-			  Prometheus export, rather than as JSON strings. This keeps the
-			  Prometheus output independent of any particular JSON encoding.
-			* Metrics that represent monotonic event counters (for example,
-			  /proc/events/graceful-exits or network interface statistics under
-			  /sys/netif) are exported using Prometheus counter naming
-			  conventions (for example, "*_total", "*_seconds_total", or
-			  "*_bytes_total" as appropriate), while memory usage and
-			  capacity metrics such as /proc/memory/total remain gauges.
+  - Scalar durations and other time-based values are normalized to
+    seconds and exported with a "_seconds" suffix.
+  - Size-related metrics are normalized to bytes and exported with a
+    "_bytes" suffix.
+  - Temperature metrics are exported with a "_celsius" suffix.
+  - String metrics are exported as "*_info" gauges with the original
+    value attached as a "value" label.
+  - Bool metrics are exported as gauges with a numeric value of 1 for
+    true and 0 for false.
+  - List metrics are exported as gauges with a {check="..."} label for
+    each item, plus a "*_count" gauge for the total number of items.
+  - time.Time values are exported as "*_time_seconds" gauges
+    representing seconds since the Unix epoch.
+  - Distributions are exported as Prometheus histograms with
+    "_bucket", "_sum", and "_count" series. The +Inf bucket is always
+    emitted last, and bucket counts are cumulative.
+  - time.Time and time.Duration metrics are represented internally as
+    native Go values (types.GoTime and types.GoDuration) for
+    Prometheus export, rather than as JSON strings. This keeps the
+    Prometheus output independent of any particular JSON encoding.
+  - All metrics are exported as gauges. Users should apply rate() or
+    increase() functions in their Prometheus queries for counter-like
+    semantics.
 
-	# Register Custom Metrics
+Metric names are converted from Tricorder paths to Prometheus-compatible
+names: path separators (/) become underscores, uppercase letters are
+converted to lowercase, and characters that are not letters, digits, or
+underscores (such as -, *, or .) are replaced with underscores. Consecutive
+underscores are collapsed to a single underscore, and trailing underscores
+are removed. Names starting with a digit are prefixed with an underscore.
+
+Examples of metric name conversion:
+
+	/proc/go/NumGoroutines       ->  proc_go_numgoroutines     (uppercase)
+	/health-checks/crond         ->  health_checks_crond       (hyphen)
+	/health-checks/crond*        ->  health_checks_crond       (trailing *)
+	/health-checks/[*]/healthy   ->  health_checks_healthy     (wildcard path)
+	/sys/netif/eth0/rx-bytes     ->  sys_netif_eth0_rx_bytes   (typical path)
+
+Note: [*] represents a literal asterisk. Due to Go comment syntax, the
+actual character sequence slash-asterisk-slash cannot appear in this
+documentation. In the example above, /health-checks/[*]/healthy shows
+how a wildcard path component is absorbed after underscore collapsing.
+
+Label values (such as the "value" label for string metrics or the "check"
+label for list metrics) preserve most characters but escape backslashes
+as \\, double quotes as \", and newlines as \n. HELP text is similarly
+escaped to comply with the Prometheus exposition format.
+
+The endpoint returns Content-Type "text/plain; version=0.0.4; charset=utf-8"
+for compatibility with OpenTelemetry Collector and other Prometheus
+scrapers. Gzip compression is supported via the Accept-Encoding header.
+
+# Register Custom Metrics
 
 To add additional metrics to the default metrics tricorder provides,
 Use tricorder.RegisterMetric() and tricorder.RegisterDirectory().
