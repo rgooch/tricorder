@@ -135,6 +135,15 @@ func promBaseName(path string) string {
 	}
 
 	result := b.String()
+
+	// Collapse multiple consecutive underscores to a single underscore
+	for strings.Contains(result, "__") {
+		result = strings.ReplaceAll(result, "__", "_")
+	}
+
+	// Trim trailing underscore for cleaner metric names
+	result = strings.TrimSuffix(result, "_")
+
 	// Prometheus metric names cannot start with a digit; prefix with underscore if needed
 	if len(result) > 0 && result[0] >= '0' && result[0] <= '9' {
 		return "_" + result
