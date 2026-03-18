@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,7 +18,14 @@ import (
 
 const (
 	prometheusContentType = "text/plain; version=0.0.4; charset=utf-8"
+	nilString             = "<nil>"
+	noneString            = "none"
+	trueString            = "true"
+	falseString           = "false"
 )
+
+// multiUnderscoreRegex matches two or more consecutive underscores
+var multiUnderscoreRegex = regexp.MustCompile(`_{2,}`)
 
 // promFamily tracks metadata for a single Prometheus metric family so that
 // HELP/TYPE lines are only emitted once per family.
@@ -137,9 +145,7 @@ func promBaseName(path string) string {
 	result := b.String()
 
 	// Collapse multiple consecutive underscores to a single underscore
-	for strings.Contains(result, "__") {
-		result = strings.ReplaceAll(result, "__", "_")
-	}
+	result = multiUnderscoreRegex.ReplaceAllString(result, "_")
 
 	// Trim trailing underscore for cleaner metric names
 	result = strings.TrimSuffix(result, "_")
@@ -349,9 +355,9 @@ func (c *prometheusCollector) emitStringInfo(m *messages.Metric) error {
 	if !ok {
 		return nil
 	}
-	// Normalize nil string representation to "none"
-	if value == "<nil>" {
-		value = "none"
+	// Normalize nil string representation to noneString
+	if value == nilString {
+		value = noneString
 	}
 	name := promBaseName(m.Path) + "_info"
 	mtype := "gauge"
@@ -436,7 +442,7 @@ func (c *prometheusCollector) emitList(m *messages.Metric) error {
 func formatListItem(v reflect.Value, subType types.Type) string {
 	// Safety check: ensure the value is valid before processing
 	if !v.IsValid() {
-		return "none"
+		return noneString
 	}
 
 	// Use type switch with kind validation to prevent panics
@@ -445,17 +451,17 @@ func formatListItem(v reflect.Value, subType types.Type) string {
 		if v.Kind() == reflect.String {
 			s := v.String()
 			// reflect.Value.String() returns "<nil>" for nil interfaces
-			if s == "<nil>" {
-				return "none"
+			if s == nilString {
+				return noneString
 			}
 			return s
 		}
 	case types.Bool:
 		if v.Kind() == reflect.Bool {
 			if v.Bool() {
-				return "true"
+				return trueString
 			}
-			return "false"
+			return falseString
 		}
 	case types.Int8, types.Int16, types.Int32, types.Int64:
 		switch v.Kind() {
@@ -491,18 +497,18 @@ func formatListItem(v reflect.Value, subType types.Type) string {
 		iface := v.Interface()
 		// Check if the interface value is nil
 		if iface == nil {
-			return "none"
+			return noneString
 		}
 		// Also handle nil pointers/interfaces wrapped in interface{}
 		rv := reflect.ValueOf(iface)
 		if rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {
 			if rv.IsNil() {
-				return "none"
+				return noneString
 			}
 		}
 		return fmt.Sprintf("%v", iface)
 	}
-	return "none"
+	return noneString
 }
 
 func (c *prometheusCollector) emitTimeGauge(m *messages.Metric) error {
